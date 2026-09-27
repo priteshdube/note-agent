@@ -9,7 +9,6 @@ from providers.gemini_provider import GeminiVideoNotesProvider
 
 class GeminiProviderTest(unittest.TestCase):
     def test_generate_notes_from_url(self):
-        # Mock response from Gemini API
         mock_response_data = {
             "candidates": [
                 {
@@ -40,25 +39,28 @@ class GeminiProviderTest(unittest.TestCase):
             ]
         }
 
-        # We'll test the async method by running it in an event loop
         async def run_test():
-            # Create a mock response object (regular Mock, not AsyncMock)
             mock_response = Mock()
             mock_response.json.return_value = mock_response_data
             mock_response.raise_for_status.return_value = None
 
-            # Create a mock client (AsyncMock because we await its post method)
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
 
-            # Make the AsyncClient constructor return a context manager that yields mock_client
             mock_client_context = AsyncMock()
             mock_client_context.__aenter__.return_value = mock_client
 
-            # Patch httpx.AsyncClient to return our context manager
-            with patch("httpx.AsyncClient", return_value=mock_client_context):
+            with patch("httpx.AsyncClient", return_value=mock_client_context) as mock_async_client:
                 provider = GeminiVideoNotesProvider(api_key="test_api_key")
                 notes = await provider.generate_notes_from_url("https://www.youtube.com/watch?v=test")
+
+                mock_async_client.assert_called_once()
+                mock_client.post.assert_awaited_once()
+                args, kwargs = mock_client.post.await_args
+                self.assertEqual(args[0], "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent")
+                self.assertEqual(kwargs["headers"]["x-goog-api-key"], "test_api_key")
+                self.assertEqual(kwargs["headers"]["Content-Type"], "application/json")
+                self.assertEqual(kwargs["json"]["contents"][0]["parts"][1]["file_data"]["mime_type"], "video/*")
                 return notes
 
         notes = asyncio.run(run_test())

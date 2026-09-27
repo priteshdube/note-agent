@@ -1,188 +1,192 @@
-# Lecture Notes Backend
+# Lecture Notes Assistant
 
-A personal tool that turns lectures/tutorials into organized Notion notes automatically.
-Two ingestion paths feed into the same note-generation and Notion-writing logic:
+Lecture Notes Assistant is a local FastAPI backend and Chrome extension that turns learning content into organized Notion notes.
 
-1. **Recorded audio path**: Records browser tab audio → uploads to backend → transcribed by Groq Whisper → summarized into structured notes by a Groq LLM → written to Notion.
-2. **YouTube URL path**: User pastes a public YouTube link → sent to backend → Gemini watches the video directly and produces structured notes in one call → written to Notion.
+It has two workflows:
 
-Both paths converge on the same `LectureNotes` Pydantic schema before hitting Notion, so the Notion-writing code has no idea which path produced the notes.
+- **YouTube:** paste a public YouTube URL. Gemini analyzes the video and creates structured notes.
+- **Recorded audio:** record audio from the active browser tab. Groq transcribes the audio, generates notes, and sends them to Notion.
 
-## Tech Stack
+Both workflows create a Notion topic page when necessary and then create a lecture page beneath it.
 
-- **FastAPI** — backend framework, async throughout
-- **uv** — package/environment manager (`pyproject.toml` + `uv.lock`, NOT `requirements.txt`)
-- **httpx** — all outbound HTTP calls (Groq, Gemini, Notion), async client
-- **Pydantic / pydantic-settings** — data contracts (`models.py`) and env config (`config.py`)
-- **Groq API** — Whisper (`whisper-large-v3-turbo`) for transcription, Llama (`llama-3.3-70b-versatile`) for note generation
-- **Gemini API** — `gemini-3.5-flash`, used only for the YouTube-URL path
-- **Notion API** — raw REST calls via httpx (no SDK)
-- **Chrome Extension (Manifest V3)** — thin client (see [Extension](#extension-notes))
+## How It Works
 
-## Architecture: Provider Abstraction
+The Chrome extension is only a client. It does not store API keys. It sends requests to the local backend at `http://localhost:8000`.
 
-All LLM/transcription calls go through abstract interfaces in `providers/base.py`:
+For YouTube processing:
 
-- `TranscriptionProvider` — audio bytes → transcript text (currently: Groq)
-- `NoteGenProvider` — transcript text → `LectureNotes` (currently: Groq)
-- `VideoUrlNotesProvider` — YouTube URL → `LectureNotes` directly (currently: Gemini)
+1. The extension sends the YouTube URL and topic name to `POST /api/process-youtube`.
+2. The backend sends the public video URL to Gemini.
+3. Gemini returns a title, sections, bullet points, and key terms.
+4. The backend creates the corresponding pages in Notion.
+5. The extension opens the generated Notion page when processing succeeds.
 
-Concrete implementations live in `providers/<name>_provider.py` and are wired up via `providers/factory.py`, which reads `.env` (`TRANSCRIPTION_PROVIDER`, `NOTEGEN_PROVIDER`) to decide which class to instantiate. Route handlers and business logic **never** import a concrete provider directly — always go through the factory functions (`get_transcription_provider()`, `get_notegen_provider()`, `get_video_url_provider()`).
+For audio processing, the backend uses Groq for transcription and note generation before writing the result to Notion.
 
-When adding a new model/provider:
-1. Implement the relevant abstract base class in a new `providers/<name>_provider.py` file
-2. Add one branch to the matching factory function
-3. Add a new env var option
-Nothing else in the codebase should need to change — if it does, the abstraction has leaked and should be reconsidered.
+## Requirements
 
-## Data Contracts (`models.py`)
+Install the following before setting up the project:
 
-- `LectureNotes` — universal output shape every provider must produce:
-  - `title`: string
-  - `sections`: list of `{heading: string, bullets: list[string]}`
-  - `key_terms`: list of `{term: string, definition: string}`
-- `ProcessResponse` — API response wrapper: `status`, `notes` (`LectureNotes`), `notion_page_url`: string?
+- macOS, Linux, or Windows
+- Python 3.13 or newer
+- [`uv`](https://docs.astral.sh/uv/)
+- Google Chrome or another Chromium-based browser
+- A Gemini API key
+- A Notion integration and a Notion root page
+- A Groq API key if you plan to use audio recording
 
-## Project Layout
+## Local Setup
 
-```
-lecture-notes-backend/
-├── main.py                  # FastAPI app, CORS middleware, router registration
-├── config.py                # pydantic-settings, reads .env
-├── models.py                # Pydantic schemas (LectureNotes, ProcessResponse, etc.)
-├── notion_client.py         # find_or_create_topic_page, create_lecture_page
-├── providers/
-│   ├── base.py               # abstract interfaces
-│   ├── groq_provider.py      # GroqTranscription, GroqNoteGen
-│   ├── gemini_provider.py    # GeminiVideoNotes
-│   └── factory.py            # env-driven provider selection
-├── routes/
-│   └── process.py            # POST /process-lecture (audio), POST /process-youtube (URL)
-├── .env                      # secrets — NEVER commit
-├── pyproject.toml / uv.lock
-└── README.md
+Run these commands from the project root:
+
+```bash
+uv sync
 ```
 
-## Environment Variables (`.env`)
-
-Create a `.env` file in the project root with the following:
+Create a file named `.env` in the project root. Do not commit this file or put these values in the Chrome extension.
 
 ```env
 TRANSCRIPTION_PROVIDER=groq
 NOTEGEN_PROVIDER=groq
-GROQ_API_KEY=your_groq_api_key_here
-GEMINI_API_KEY=your_gemini_api_key_here
-NOTION_TOKEN=your_notion_integration_token_here
-NOTION_ROOT_PAGE_ID=your_notion_root_page_id_here  # 32-character ID from the page's URL
-API_KEY=optional_api_key_for_endpoint_protection  # if set, requires X-API-Key header
+GROQ_API_KEY=your_groq_api_key
+GEMINI_API_KEY=your_gemini_api_key
+NOTION_TOKEN=your_notion_integration_token
+NOTION_ROOT_PAGE_ID=your_notion_root_page_id
 ```
 
-> **Notion Setup Notes**: The Notion integration must be explicitly connected to the root page via the page's "•••" menu → Connections → add the integration. Creating the integration alone is not enough. `NOTION_ROOT_PAGE_ID` is the 32-character ID from the page's URL, not the page name or the full URL.
+`GROQ_API_KEY` is needed for the audio workflow. `GEMINI_API_KEY` is needed for the YouTube workflow. The backend currently expects all required settings to exist when it starts.
 
-## Installation & Setup
+### Create The Notion Integration
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd lecture-notes-backend
-   ```
+1. Create an internal integration in Notion and copy its token into `NOTION_TOKEN`.
+2. Create or choose the page that should contain your generated notes.
+3. Open that page's **Connections** menu and connect the integration.
+4. Copy the root page ID from the Notion page URL into `NOTION_ROOT_PAGE_ID`.
 
-2. **Install dependencies using uv**
-   ```bash
-   uv sync  # installs dependencies into .venv and creates a virtual environment
-   ```
+The root page ID is the long identifier in the page URL. It may be displayed with or without hyphens. Do not use the page title or the complete URL.
 
-3. **Create `.env` file**
-   - Copy the example above and fill in your actual keys and IDs.
-   - **Never commit `.env` to version control**.
+If the integration is not connected to the root page, Notion will usually return an `object_not_found` or permissions error.
 
-4. **Activate the virtual environment (if needed)**
-   ```bash
-   source .venv/bin/activate  # on Unix/macOS
-   .\.venv\Scripts\activate   # on Windows
-   ```
+## Start The Backend
 
-## Running the Backend
+Start the local API server:
 
 ```bash
 uv run uvicorn main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`.
+The backend runs at `http://localhost:8000`. Verify it before testing the extension:
 
-- Interactive API docs: `http://localhost:8000/docs`
-- Alternative docs: `http://localhost:8000/redoc`
-- Health check: `http://localhost:8000/health`
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"healthy"}
+```
+
+You can also open `http://localhost:8000/docs` to view and test the FastAPI endpoints in Swagger UI.
+
+If port 8000 is already in use, first open the health URL. The backend may already be running, so you do not need to start a second server.
+
+## Load The Chrome Extension
+
+1. Open `chrome://extensions` in Chrome.
+2. Turn on **Developer mode**.
+3. Click **Load unpacked**.
+4. Select this project's `extension` folder, not the project root.
+5. Click the extension's reload button whenever you change extension files.
+6. Pin the extension to the Chrome toolbar for easier access.
+
+The extension popup contains controls for YouTube processing and tab-audio recording. The extension does not need the Gemini, Groq, or Notion keys because those are used only by the backend.
+
+## Test The YouTube Workflow
+
+YouTube is the easiest workflow to test because it does not require browser audio capture.
+
+1. Make sure the backend is running and `/health` returns `{"status":"healthy"}`.
+2. Reload the unpacked extension in `chrome://extensions`.
+3. Open the extension popup.
+4. Enter a topic name, for example `Operating Systems`.
+5. Paste a public YouTube URL.
+6. Click **Process YouTube Video**.
+7. Wait while Gemini analyzes the video and Notion creates the pages.
+
+The topic name is required by the backend. Use a public video that Gemini can access; private, restricted, or unavailable videos may fail.
+
+The request is sent as multipart form data:
+
+```text
+POST http://localhost:8000/api/process-youtube
+youtube_url=<public YouTube URL>
+topic_name=<Notion topic name>
+```
+
+On success, the extension displays a success message and opens the generated Notion page.
+
+## Test The Audio Workflow
+
+1. Open a browser tab that is playing a short lecture or other audio.
+2. Open the extension popup and enter a topic name.
+3. Click **Start Recording**.
+4. Play the content you want to capture.
+5. Click **Stop Recording**.
+6. Wait for Groq transcription, note generation, and Notion creation to finish.
+
+The extension records the active tab using Chrome's `tabCapture` permission. Very long recordings may exceed provider file-size or rate limits. Start with a short clip while testing.
+
+## Troubleshooting
+
+### The popup buttons do nothing
+
+Reload the extension from `chrome://extensions`. Confirm that `extension/popup.html` loads `popup.js`. To inspect JavaScript errors, open the extension details and select **Inspect views** for the popup or service worker.
+
+### Backend error 422
+
+The request is missing a required form field. For YouTube, enter both a public URL and a topic name. The backend requires both `youtube_url` and `topic_name`.
+
+### Backend error 401
+
+This means backend API-key protection is enabled. The current local extension does not send an `X-API-Key` header. Remove `API_KEY` from `.env` for local testing, or update the extension and backend configuration together before enabling that protection.
+
+### Backend error 500
+
+Read the Uvicorn terminal output for the detailed exception. Common causes are an invalid Gemini key, an unavailable video, missing Notion credentials, or Notion permissions.
+
+### Notion says the object was not found
+
+Check that `NOTION_ROOT_PAGE_ID` is correct and that the Notion integration is connected to the root page through **Connections**. Creating an integration alone does not grant it access to pages.
+
+### The request stays on "Sending YouTube URL to backend"
+
+Confirm that `http://localhost:8000/health` responds. Then inspect the service worker console for the extension and the terminal running Uvicorn. The backend may be waiting for Gemini or Notion, or it may have returned an error that is shown in the console.
 
 ## API Endpoints
 
-Both endpoints require authentication if `API_KEY` is set in `.env` (provide `X-API-Key` header).
+| Endpoint | Purpose | Required fields |
+| --- | --- | --- |
+| `GET /health` | Check that the backend is running | None |
+| `POST /api/process-youtube` | Generate notes from a YouTube URL | `youtube_url`, `topic_name` |
+| `POST /api/process-lecture` | Generate notes from an audio upload | `audio_file`, `topic_name` |
 
-### Process Lecture (Audio)
-```
-POST /api/process-lecture
-```
+Both processing endpoints return a `ProcessResponse` containing the processing status, generated `LectureNotes`, and the Notion page URL.
 
-**Form Data**
-- `audio_file`: file (multipart/form-data) — supported extensions: .mp3, .wav, .ogg, .m4a, .flac, .webm
-- `topic_name`: string — name of the topic under which to create/not find a Notion page
+## Project Structure
 
-**Returns**
-```json
-{
-  "status": "success",
-  "notes": {
-    "title": "string",
-    "sections": [{"heading": "string", "bullets": ["string", ...]}, ...],
-    "key_terms": [{"term": "string", "definition": "string"}, ...]
-  },
-  "notion_page_url": "string or null"
-}
-```
-
-### Process YouTube
-```
-POST /api/process-youtube
+```text
+main.py                  FastAPI application and middleware
+config.py                Environment settings
+models.py                Pydantic request and response models
+routes/process.py        YouTube and audio endpoints
+providers/base.py        Provider interfaces
+providers/gemini_provider.py  YouTube note generation
+providers/groq_provider.py     Audio transcription and note generation
+providers/factory.py     Provider selection
+notion_client.py         Notion page creation
+extension/               Chrome Manifest V3 extension
+tests/                   Backend tests
 ```
 
-**Form Data**
-- `youtube_url`: string — must start with http/https
-- `topic_name`: string — name of the topic under which to create/not find a Notion page
-
-**Returns**
-Same structure as `/api/process-lecture`.
-
-## Extension Notes
-
-The Chrome Extension (Manifest V3) is a separate project. It should:
-- Record tab audio via `chrome.tabCapture` + an offscreen document (since MV3 service workers can't hold a `MediaRecorder` alive)
-- Accept a pasted YouTube URL
-- Upload to this backend's `/api/process-lecture` (audio) or `/api/process-youtube` (YouTube) endpoints
-- Display status to the user
-- **Hold NO API keys** — all secrets live server-side in this project's `.env`
-
-> ⚠️ The extension still uses the old direct-to-provider approach from an earlier iteration and needs to be updated to call this backend instead. **Do not re-add API keys to the extension** when doing this.
-
-## Known Constraints
-
-- **Groq free tier**: ~25MB per audio file for Whisper, 30 req/min, 6,000 tokens/min. Long lectures may need audio chunking or rolling summarization (not yet implemented).
-- **Gemini free tier**: YouTube video ingestion capped at ~8 hours of video per day. YouTube-URL path only works for public videos, not private/unlisted ones.
-- **Notion's `children` array limit**: Capped at 100 blocks per page creation call. Very long note sets need a follow-up `PATCH /v1/blocks/{page_id}/children` call to append the rest (not yet implemented).
-
-## Testing Conventions
-
-- Test every provider standalone with a one-off `uv run python -c "..."` script before wiring it into a route — isolates whether a bug is in the provider, the route, or the extension.
-- Test the FastAPI routes with `curl` or the auto-generated `/docs` (Swagger UI) before touching the extension. The extension should be the last thing tested, once the backend is confirmed working end-to-end.
-
-## Current Status
-
-- Backend scaffolding, config, and models done.
-- Groq provider (transcription + notegen) implemented and tested standalone.
-- Gemini video-URL provider implemented, pending standalone test.
-- Notion client implemented.
-- Routes wired end-to-end and tested.
-- Extension still uses the old direct-to-provider approach and needs updating.
-
----
-
-**Made with ❤️ for turning lectures into actionable notes.**
+Keep API keys in `.env` only. The Chrome extension should remain a thin client that communicates with the backend.

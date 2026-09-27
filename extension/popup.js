@@ -125,6 +125,11 @@ async function processYouTube() {
         return;
     }
 
+    if (!topicName) {
+        setStatus('Please enter a topic name', 'error');
+        return;
+    }
+
     try {
         setStatus('Processing YouTube video...', 'info');
 

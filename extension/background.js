@@ -34,7 +34,8 @@ async function processAudio(audioData, topicName) {
         });
 
         if (!response.ok) {
-            throw new Error(`Backend error: ${response.status}`);
+            const errorBody = await response.text();
+            throw new Error(`Backend error ${response.status}: ${errorBody}`);
         }
 
         const result = await response.json();
@@ -80,7 +81,8 @@ async function processYouTube(youtubeUrl, topicName) {
         });
 
         if (!response.ok) {
-            throw new Error(`Backend error: ${response.status}`);
+            const errorBody = await response.text();
+            throw new Error(`Backend error ${response.status}: ${errorBody}`);
         }
 
         const result = await response.json();
